@@ -1,0 +1,282 @@
+**********************************************************************************
+*A1 — Creation of a Clean Time-Series Dataset for Real GDP
+*Course: Macroeconometrics I (MEMF, 2024/2025)
+*Objective: Import and prepare Real GDP data (United Kingdom) 
+**********************************************************************************
+rename (observation_date) (date_excel) // Rename the variable observation_date to date_excel.
+egen t = seq() // Create a counter t = 1, 2, 3, … in the current sort order of the data. This will be used to construct a quarterly time variable.
+gen date = tq(1955q1) + t - 1 // Generate a numeric quarterly date variable starting in 1955q1.
+tsset date, quarterly // Declare the dataset as a quarterly time series indexed by date. This enables time-series operators (L., F., D.) and allows Stata to check for gaps.
+gen year = year(dofq(date)) // Extract the calendar year from the quarterly date.
+gen quarter = quarter(dofq(date)) // Extract the quarter number (1–4) from the quarterly date.
+save "C:/Users/PC/Documents/RGDP_UK.dta", replace
+*********************************************************************************
+*Summary of A1:
+** ✔ Imported raw Real GDP data (UK)
+** ✔ Renamed variables for clarity
+** ✔ Created a sequential index (t)
+** ✔ Generated a quarterly time variable (date)
+** ✔ Declared the dataset as a quarterly time series (tsset)
+** ✔ Added year and quarter variables
+** ✔ Dataset ready for analysis in A2
+*********************************************************************************
+
+
+**********************************************************************************
+*A2 — Preliminary Analysis of Real GDP (GB)
+*Course: Macroeconometria 1 (MEMF, 2024/2025)
+*Objective: Visualize, transform, and compute growth rates of Real GDP data (Great Britain)
+**********************************************************************************
+clear all
+set more off
+cd "C:\Users\PC\Documents" // Work in Documents where the dataset was saved
+use RGDPGB.dta, clear // Loading the dataset saved
+tsset date, quarterly // Ensure time-series settings are active
+gen GDP_real = NGDPRSAXDCGBQ //generates - main variable (Real GDP).
+gen GDP_lag1 = L.GDP_real //generates - GDP from one quarter earlier.
+gen GDP_lag4 = L4.GDP_real // generates - GDP from the same quarter one year earlier.
+gen GDP_diff1 = D.GDP_real //generates - quarterly change in GDP.
+gen GDP_diff4 = S4.GDP_real // generates - yearly (seasonal) change in GDP.
+gen GDP_qgrowth      = (GDP_real - GDP_lag1)/GDP_lag1
+gen GDP_qgrowth_pct  = GDP_qgrowth*100 //Calculates percentage growth rates quarter-to-quarter growth (%).
+gen GDP_ygrowth      = (GDP_real - GDP_lag4)/GDP_lag4
+gen GDP_ygrowth_pct  = GDP_ygrowth*100 // Calculates percentage growth rates: year-to-year growth (%).
+gen ln_GDP = ln(GDP_real) // natural logarithm of GDP.
+gen GDP_qgrowth_logpct = D.ln_GDP*100 // quarterly change in logs ≈ continuous quarterly growth (%).
+gen GDP_ygrowth_logpct = (ln_GDP - L4.ln_GDP)*100 // yearly log difference ≈ continuous annual growth (%).
+* GRAPHIC VISUALIZATION
+twoway (tsline GDP_qgrowth_pct) (tsline GDP_qgrowth_logpct) // Plots quarterly growth rates, comparing normal vs. log-based series.
+twoway (tsline GDP_ygrowth_pct) (tsline GDP_ygrowth_logpct) // Plots year-on-year growth rates, again comparing both measures.
+save "C:\Users\PC\Documents\RGDPGB.dta", replace
+*********************************************************************************
+* Summary of A2:
+** ✔ Loaded cleaned dataset from A1
+** ✔ Generated lags and differences
+** ✔ Computed quarterly and yearly growth rates (%)
+** ✔ Created log-based growth measures
+** ✔ Visualized short-term (quarterly) and long-term (annual) trends
+** ✔ Dataset updated for use in A3 (Cycle Analysis)
+*********************************************************************************
+
+**********************************************************************************
+*A3 — Classical Business Cycles (UK)
+*Course: Macroeconometria 1 (MEMF, 2024/2025)
+*Objective: Classical-cycle view, recession rule, and BBQ turning points
+**********************************************************************************
+clear all
+set more off
+*--------------------------------------------------------------*
+* 1) Load data & declare time
+*--------------------------------------------------------------
+use "C:\Users\PC\Documents\RGDPGB.dta", clear
+tsset date, quarterly
+*--------------------------------------------------------------*
+* 2) Level plot (visual check)
+*--------------------------------------------------------------*
+twoway (tsline NGDPRSAXDCGBQ), 
+ title("GB Real GDP (level)") xtitle("Quarter") ytitle("Level")
+*--------------------------------------------------------------*
+* 3) Classical-cycle transforms & recession rule
+*    (replace first so the do-file runs cleanly every time)
+*--------------------------------------------------------------*	
+replace y  = GDP_real
+replace d1y = D.y                  
+replace ly  = ln(y)                
+gen dly = D.ly                   
+* Recession rule: two consecutive quarterly declines
+gen vcrec  = ((d1y<0) + (L.d1y<0) >= 2)
+gen vcrecl = ((dly<0) + (L.dly<0) >= 2)
+*--------------------------------------------------------------*
+* 4) Turning points via BBQ (Harding & Pagan, 2002)
+*--------------------------------------------------------------*
+capture drop ly_point
+capture drop min_ly
+sbbq ly // Detects turning points in log GDP
+egen min_ly = min(ly)
+list date ly_point if inlist(ly_point, 1, -1)
+tsline ly || ///
+    pcspike min_ly date ly date if ly_point==1 || 
+    pcspike min_ly date ly date if ly_point==-1, 
+    lpattern(dash) ///
+    legend(order(2 "Peaks" 3 "Troughs")) 
+    title("Turning Points in GB Log RGDP")
+save "C:\Users\PC\Documents\RGDPGB.dta", replace
+**********************************************************************************
+* Summary of A3:
+** ✔ Built q/q changes in level and logs (d1y, dly)
+** ✔ Created recession indicators (vcrec, vcrecl)
+** ✔ Dated peaks and troughs with BBQ (ly_point)
+** ✔ Graphed log RGDP with turning points marked
+** ✔ Saved dataset for A4 (detrending)
+**********************************************************************************
+
+**********************************************************************************
+*A4 — Growth Cycles (GB): Detrending and Cycle Extraction
+*Course: Macroeconometria 1 (MEMF, 2024/2025)
+*Objective: Remove long-term trends (linear, quadratic, cubic, structural break)
+**********************************************************************************
+clear all
+set more off
+use "C:\Users\PC\Documents\RGDPGB.dta", clear
+tsset date, quarterly
+*--------------------------------------------------------------*
+* 1. Prepare data
+*--------------------------------------------------------------*
+capture confirm variable t
+if _rc egen t = seq()   // Create a simple time index if missing
+capture drop y
+gen y = GDP_real    // Working series (level)
+capture drop ly
+gen ly = ln(y)     // Log level (used later if needed)
+*--------------------------------------------------------------*
+* 2) Linear trend
+*   y_t = a + b*t   → ciclo = residuals from linear fit
+*--------------------------------------------------------------*
+capture drop tend_lin ciclo_lin
+regress y t
+predict tend_lin
+predict ciclo_lin, resid
+twoway (tsline y) (tsline tend_lin) (tsline ciclo_lin, yaxis(2)),
+    title("GB RGDP — Linear Trend Detrending")	
+*--------------------------------------------------------------*
+* 3) Quadratic trend
+*   y_t = a + b*t + c*t^2
+*--------------------------------------------------------------*	
+	capture drop t2 tend_quad ciclo_quad
+gen t2 = t^2
+regress y t t2
+predict tend_quad
+predict ciclo_quad, resid
+twoway (tsline y) (tsline tend_quad) (tsline ciclo_quad, yaxis(2)), 
+    title("GB RGDP — Quadratic Trend Detrending")\
+*--------------------------------------------------------------*
+* 4) Cubic trend
+*   y_t = a + b*t + c*t^2 + d*t^3
+*--------------------------------------------------------------*
+	capture drop t3 tend_cub ciclo_cub
+gen t3 = t^3
+regress y t t2 t3
+predict tend_cub
+predict ciclo_cub, resid
+twoway (tsline y) (tsline tend_cub) (tsline ciclo_cub, yaxis(2)), ///
+    title("GB RGDP — Cubic Trend Detrending")
+*--------------------------------------------------------------*
+* 5) Structural break (2009q1)
+*   Pre-2009q1: quadratic trend; Post-2009q1: linear trend
+*--------------------------------------------------------------*
+capture drop tend_sb1 ciclo_sb1 tend_sb2 ciclo_sb2 tend_sb ciclo_sb
+twoway (tsline y), title("GB RGDP — Visual Break around 2009q1")
+regress y t t2 if year<=2008 & quarter<=4
+predict tend_sb1 if year<=2008 & quarter<=4
+predict ciclo_sb1 if year<=2008 & quarter<=4, resid
+regress y t if year>=2009 & quarter>=1
+predict tend_sb2 if year>=2009 & quarter>=1
+predict ciclo_sb2 if year>=2009 & quarter>=1, resid
+replace tend_sb1 = 0 if year>=2009 & quarter>=1
+replace ciclo_sb1 = 0 if year>=2009 & quarter>=1
+replace tend_sb2 = 0 if year<=2008 & quarter<=4
+replace ciclo_sb2 = 0 if year<=2008 & quarter<=4
+gen tend_sb  = tend_sb1 + tend_sb2
+gen ciclo_sb = ciclo_sb1 + ciclo_sb2
+twoway (tsline y) (tsline tend_sb) (tsline ciclo_sb, yaxis(2)), 
+    title("GB RGDP — Structural Break Detrending (2009q1)")
+save "C:\Users\PC\Documents\RGDPGB.dta", replace
+**********************************************************************************
+* Summary of A4:
+** ✔ Built linear, quadratic, and cubic trends (t, t^2, t^3)
+** ✔ Extracted cyclical components as residuals
+** ✔ Implemented structural break detrending (2009q1)
+** ✔ Generated and named all comparison graphs
+** ✔ Saved dataset for A5 (filters: HP, BK, CF)
+**********************************************************************************
+
+**********************************************************************************
+*A5 — Growth Cycles (GB): Statistical Filters (HP, BK, CF)
+*Course: Macroeconometria 1 (MEMF, 2024/2025)
+*Objective: Extract cyclical components using Hodrick–Prescott, Baxter–King, and Christiano–Fitzgerald filters
+**********************************************************************************
+clear all
+set more off
+use "C:\Users\PC\Documents\RGDPGB.dta", clear
+tsset date, quarterly
+* Ensure main level series exists
+capture confirm variable GDP_real
+if _rc gen GDP_real = NGDPRSAXDCGBQ
+* Work with y
+capture drop y
+gen y = GDP_real
+*--------------------------------------------------------------*
+* 1. HP filter
+*--------------------------------------------------------------*
+capture drop ciclohp tendhp ciclohpz tendhpz ciclohpinf tendhpinf
+* Default λ=1600
+tsfilter hp ciclohp = y, trend(tendhp)
+twoway (tsline y) (tsline tendhp) (tsline ciclohp, yaxis(2)), 
+    title("GB RGDP — HP Filter (λ=1600)")
+    name(HP_Default, replace)
+* Very low smoothing (almost no trend removal)
+tsfilter hp ciclohpz = y, trend(tendhpz) smooth(0.000001)
+twoway (tsline y) (tsline tendhpz) (tsline ciclohpz, yaxis(2)), 
+    title("GB RGDP — HP Filter (λ≈0)") 
+    name(HP_LowLambda, replace)
+* Very high smoothing (trend ~ smooth curve)
+tsfilter hp ciclohpinf = y, trend(tendhpinf) smooth(999999999)
+twoway (tsline y) (tsline tendhpinf) (tsline ciclohpinf, yaxis(2)), 
+    title("GB RGDP — HP Filter (λ→∞)") 
+    name(HP_HighLambda, replace)
+*--------------------------------------------------------------*
+* 2. BK filter 
+*--------------------------------------------------------------*
+capture drop ciclobk tendbk ciclobk24 tendbk24 ciclobk2 tendbk2
+capture drop ciclobkmin tendbkmin ciclobkmax tendbkmax
+capture drop g a gmin amin gmax amax
+* Default: minperiod(6), maxperiod(32), smaorder(12), nonstationary series
+tsfilter bk ciclobk = y, trend(tendbk)
+* Wider window (smoother cycles)
+tsfilter bk ciclobk24 = y, trend(tendbk24) smaorder(24)
+* Narrow window (less end-loss but noisier)
+tsfilter bk ciclobk2  = y, trend(tendbk2)  smaorder(2)
+twoway (tsline ciclobk) (tsline ciclobk24) (tsline ciclobk2), 
+    title("GB RGDP — BK Filter: Window Sensitivity") 
+    legend(order(1 "sma 12" 2 "sma 24" 3 "sma 2")) 
+    name(BK_Window, replace)
+* Change pass-band (periods in quarters)
+tsfilter bk ciclobkmin = y, trend(tendbkmin) minperiod(2)
+tsfilter bk ciclobkmax = y, trend(tendbkmax) maxperiod(12)
+
+twoway (tsline ciclobk) (tsline ciclobkmin) (tsline ciclobkmax), 
+    title("GB RGDP — BK Filter: Pass-Band Sensitivity") 
+    legend(order(1 "Default 6–32" 2 "Min 2" 3 "Max 12"))
+    name(BK_Band, replace)
+* Gain (frequency response)
+tsfilter bk ciclobkgg = y, gain(g a)
+scatter g a, title("BK Gain (Default)") name(BK_Gain_Default, replace)
+tsfilter bk ciclobkming = y, minperiod(2) gain(gmin amin)
+scatter gmin amin, title("BK Gain (Minperiod=2)") name(BK_Gain_Min, replace)
+tsfilter bk ciclobkmaxg = y, maxperiod(12) gain(gmax amax)
+scatter gmax amax, title("BK Gain (Maxperiod=12)") name(BK_Gain_Max, replace)
+*--------------------------------------------------------------*
+* 3. CF Filter 
+*--------------------------------------------------------------*
+capture drop ciclocf tendcf
+tsfilter cf ciclocf = y, trend(tendcf)
+twoway (tsline y) (tsline tendcf) (tsline ciclocf, yaxis(2)), 
+    title("GB RGDP — CF Filter") 
+    name(CF_Default, replace)	
+*--------------------------------------------------------------*
+* 4. Comparation  - Compare HP vs BK vs CF cycles (same plot)
+*--------------------------------------------------------------*
+twoway (tsline ciclohp) (tsline ciclobk) (tsline ciclocf), 
+    title("GB RGDP — Cycles: HP vs BK vs CF") 
+    legend(order(1 "HP" 2 "BK" 3 "CF")) ///
+    name(Compare_HP_BK_CF, replace)
+save "C:\Users\PC\Documents\RGDPGB.dta", replace
+**********************************************************************************
+* Summary of A5:
+** ✔ Applied HP filter (λ=1600; sensitivity checked)
+** ✔ Applied BK filter (window & pass-band sensitivity; gain plots)
+** ✔ Applied CF filter (no end-loss)
+** ✔ Compared HP/BK/CF cycle components on one chart
+** ✔ Saved all series for A6 (Dating & Durations)
+**********************************************************************************
+
